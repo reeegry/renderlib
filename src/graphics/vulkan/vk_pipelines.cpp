@@ -1,15 +1,27 @@
-﻿#include "graphics/vulkan/vk_pipelines.h"
+#include "graphics/vulkan/vk_pipelines.h"
 
+#include <cstdint>
+#include <fmt/base.h>
 #include <fstream>
+#include <spdlog/spdlog.h>
+#include "core/Logging.h"
+#include <filesystem>
 
 #include "graphics/vulkan/vk_initializers.h"
 
 bool vkutil::load_shader_module(const char* filePath, VkDevice device,
                                 VkShaderModule* outShaderModule) {
     // open the file. With cursor at the end
+    if (!std::filesystem::exists(filePath)) {
+        LOGE("Shader file does not exist: {}", filePath);
+        return false;
+    }
+
+    // Open the file in binary mode, with the cursor at the end
     std::ifstream file(filePath, std::ios::ate | std::ios::binary);
 
     if (!file.is_open()) {
+        LOGE("Failed to open shader file: {}", filePath);
         return false;
     }
 
@@ -19,12 +31,14 @@ bool vkutil::load_shader_module(const char* filePath, VkDevice device,
     const auto fileSize = file.tellg();
 
     if (fileSize == -1) {
-        spdlog::error("Failed to open file {}", filePath);
+        LOGE("Failed to open file {}", filePath);
         return false;
     }
+
     // spirv expects the buffer to be on uint32, so make sure to reserve a int
     // vector big enough for the entire file
-    std::vector<uint32_t> buffer(static_cast<uint32_t>(fileSize) / sizeof(uint32_t));
+    std::vector<uint32_t> buffer(static_cast<uint32_t>(fileSize) /
+                                 sizeof(uint32_t));
 
     // put file cursor at beginning
     file.seekg(0);
@@ -47,128 +61,191 @@ bool vkutil::load_shader_module(const char* filePath, VkDevice device,
 
     // check that the creation goes well.
     VkShaderModule shaderModule;
-    if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) !=
-        VK_SUCCESS) {
+    VkResult result =
+            vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
+    if (result != VK_SUCCESS) {
+        LOGE("Error: Failed to create shader module.");
         return false;
     }
     *outShaderModule = shaderModule;
+    LOGI("Shader module created successfully.");
     return true;
 }
 
 void PipelineBuilder::clear() {
-    // clear all of the structs we need back to 0 with their correct stype
-
+    // Initialize input assembly with proper defaults
     _inputAssembly = {
-            .sType =
-                    VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE
+    };
 
+    // Initialize rasterizer with proper defaults
     _rasterizer = {
-            .sType =
-                    VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .depthClampEnable = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode = VK_POLYGON_MODE_FILL,
+        .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_CLOCKWISE,
+        .depthBiasEnable = VK_FALSE,
+        .depthBiasConstantFactor = 0.0f,
+        .depthBiasClamp = 0.0f,
+        .depthBiasSlopeFactor = 0.0f,
+        .lineWidth = 1.0f  // CRITICAL: Must be 1.0f, not 0.0f
+    };
 
-    _colorBlendAttachment = {};
+    // Initialize color blend attachment with defaults
+    _colorBlendAttachment = {
+        .blendEnable = VK_FALSE,
+        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+    };
 
+    // Initialize multisampling with proper defaults
     _multisampling = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,  // CRITICAL: Must be valid sample count
+        .sampleShadingEnable = VK_FALSE,
+        .minSampleShading = 1.0f,
+        .pSampleMask = nullptr,
+        .alphaToCoverageEnable = VK_FALSE,
+        .alphaToOneEnable = VK_FALSE
+    };
 
     _pipelineLayout = {};
 
+    // Initialize depth-stencil with proper defaults
     _depthStencil = {
-            .sType =
-                    VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_FALSE,
+        .depthWriteEnable = VK_FALSE,
+        .depthCompareOp = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable = VK_FALSE,
+        .minDepthBounds = 0.0f,
+        .maxDepthBounds = 1.0f
+    };
 
-    _renderInfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    // Initialize rendering info with proper defaults
+    _renderInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .depthAttachmentFormat = VK_FORMAT_UNDEFINED
+    };
 
     _shaderStages.clear();
 }
 
-VkPipeline PipelineBuilder::build_pipeline(VkDevice device) {
+VkPipeline PipelineBuilder::build_pipeline(VkDevice device) const {
+    // Make local copies of struct members that we need to modify
+    VkPipelineRenderingCreateInfo renderInfo = _renderInfo;
+    VkPipelineRasterizationStateCreateInfo rasterizer = _rasterizer;
+    VkPipelineMultisampleStateCreateInfo multisampling = _multisampling;
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly = _inputAssembly;
+
+    // Fix any uninitialized values
+    if (renderInfo.depthAttachmentFormat == 0) {
+        renderInfo.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+    }
+
+    // Ensure rasterizer line width is valid
+    if (rasterizer.lineWidth <= 0.0f) {
+        rasterizer.lineWidth = 1.0f;
+    }
+
+    // Ensure multisampling uses a valid sample count
+    if (multisampling.rasterizationSamples == 0) {
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    }
+
+    // Avoid POINT_LIST topology without PointSize in shader
+    if (inputAssembly.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST) {
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    }
+
     // make viewport state from our stored viewport and scissor.
-    // at the moment we wont support multiple viewports or scissors
     VkPipelineViewportStateCreateInfo viewportState = {};
     viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     viewportState.pNext = nullptr;
-
     viewportState.viewportCount = 1;
     viewportState.scissorCount = 1;
+    // Use dynamic viewport and scissor
+    VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dynamicState = {};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.pDynamicStates = dynamicStates;
+    dynamicState.dynamicStateCount = 2;
 
-    // setup dummy color blending. We arent using transparent objects yet
-    // the blending is just "no blend", but we do write to the color attachment
+    // setup color blending
     VkPipelineColorBlendStateCreateInfo colorBlending = {};
-    colorBlending.sType =
-            VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     colorBlending.pNext = nullptr;
-
     colorBlending.logicOpEnable = VK_FALSE;
     colorBlending.logicOp = VK_LOGIC_OP_COPY;
     colorBlending.attachmentCount = 1;
     colorBlending.pAttachments = &_colorBlendAttachment;
 
-    // completely clear VertexInputStateCreateInfo, as we have no need for it
-    VkPipelineVertexInputStateCreateInfo _vertexInputInfo = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    // completely clear VertexInputStateCreateInfo
+    const VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+    };
+
     // build the actual pipeline
-    // we now use all of the info structs we have been writing into into this
-    // one to create the pipeline
-    VkGraphicsPipelineCreateInfo pipelineInfo = {
-            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    // connect the renderInfo to the pNext extension mechanism
-    pipelineInfo.pNext = &_renderInfo;
-
-    pipelineInfo.stageCount = (uint32_t)_shaderStages.size();
+    VkGraphicsPipelineCreateInfo pipelineInfo = {};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &renderInfo;  // Use our local copy
+    pipelineInfo.stageCount = static_cast<uint32_t>(_shaderStages.size());
     pipelineInfo.pStages = _shaderStages.data();
-    pipelineInfo.pVertexInputState = &_vertexInputInfo;
-    pipelineInfo.pInputAssemblyState = &_inputAssembly;
+    pipelineInfo.pVertexInputState = &vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = &inputAssembly; // Use our local copy
     pipelineInfo.pViewportState = &viewportState;
-    pipelineInfo.pRasterizationState = &_rasterizer;
-    pipelineInfo.pMultisampleState = &_multisampling;
-    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pRasterizationState = &rasterizer;  // Use our local copy
+    pipelineInfo.pMultisampleState = &multisampling;  // Use our local copy
     pipelineInfo.pDepthStencilState = &_depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = _pipelineLayout;
+    pipelineInfo.renderPass = VK_NULL_HANDLE; // We use dynamic rendering
+    pipelineInfo.subpass = 0;
+    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
-    VkDynamicState state[] = {VK_DYNAMIC_STATE_VIEWPORT,
-                              VK_DYNAMIC_STATE_SCISSOR};
-
-    VkPipelineDynamicStateCreateInfo dynamicInfo = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dynamicInfo.pDynamicStates = &state[0];
-    dynamicInfo.dynamicStateCount = 2;
-
-    pipelineInfo.pDynamicState = &dynamicInfo;
-
-    // its easy to error out on create graphics pipeline, so we handle it a bit
-    // better than the common VK_CHECK case
     VkPipeline newPipeline;
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
                                   nullptr, &newPipeline) != VK_SUCCESS) {
-        fmt::println("failed to create pipeline");
-        return VK_NULL_HANDLE;  // failed to create graphics pipeline
-    } else {
-        return newPipeline;
+
+        LOGE("Failed to create graphics pipeline in build_pipeline.");
+        return VK_NULL_HANDLE;
     }
+
+    return newPipeline;
 }
 
 void PipelineBuilder::set_shaders(VkShaderModule vertexShader,
                                   VkShaderModule fragmentShader) {
     _shaderStages.clear();
 
-    _shaderStages.push_back(vkinit::pipeline_shader_stage_create_info(
+    _shaderStages.emplace_back(vkinit::pipeline_shader_stage_create_info(
             VK_SHADER_STAGE_VERTEX_BIT, vertexShader));
 
-    _shaderStages.push_back(vkinit::pipeline_shader_stage_create_info(
+    _shaderStages.emplace_back(vkinit::pipeline_shader_stage_create_info(
             VK_SHADER_STAGE_FRAGMENT_BIT, fragmentShader));
 }
 
 void PipelineBuilder::set_input_topology(VkPrimitiveTopology topology) {
     _inputAssembly.topology = topology;
-    // we are not going to use primitive restart on the entire tutorial so leave
-    // it on false
+
+    // Avoid POINT_LIST topology which requires special shader setup
+    if (topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST) {
+        // Fall back to triangle list if point list is requested
+        _inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    }
+
     _inputAssembly.primitiveRestartEnable = VK_FALSE;
 }
 
 void PipelineBuilder::set_polygon_mode(VkPolygonMode mode) {
     _rasterizer.polygonMode = mode;
-    _rasterizer.lineWidth = 1.f;
+    _rasterizer.lineWidth = 1.0f;  // Always set to 1.0
 }
 
 void PipelineBuilder::set_cull_mode(VkCullModeFlags cullMode,
@@ -178,12 +255,12 @@ void PipelineBuilder::set_cull_mode(VkCullModeFlags cullMode,
 }
 
 void PipelineBuilder::set_multisampling_none() {
+    _multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    _multisampling.pNext = nullptr;
     _multisampling.sampleShadingEnable = VK_FALSE;
-    // multisampling defaulted to no multisampling (1 sample per pixel)
     _multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
     _multisampling.minSampleShading = 1.0f;
     _multisampling.pSampleMask = nullptr;
-    // no alpha to coverage either
     _multisampling.alphaToCoverageEnable = VK_FALSE;
     _multisampling.alphaToOneEnable = VK_FALSE;
 }
@@ -205,6 +282,16 @@ void PipelineBuilder::set_color_attachment_format(VkFormat format) {
 }
 
 void PipelineBuilder::set_depth_format(VkFormat format) {
+    // Ensure format is valid or undefined
+    if (format != VK_FORMAT_D16_UNORM &&
+        format != VK_FORMAT_D32_SFLOAT &&
+        format != VK_FORMAT_D16_UNORM_S8_UINT &&
+        format != VK_FORMAT_D24_UNORM_S8_UINT &&
+        format != VK_FORMAT_D32_SFLOAT_S8_UINT &&
+        format != VK_FORMAT_UNDEFINED) {
+        format = VK_FORMAT_UNDEFINED;
+    }
+
     _renderInfo.depthAttachmentFormat = format;
 }
 
