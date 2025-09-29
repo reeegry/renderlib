@@ -14,7 +14,6 @@ on:
       - cmake/**
       - scripts/**
       - shaders/**
-  workflow_dispatch:
 
 jobs:
   cpp-linter:
